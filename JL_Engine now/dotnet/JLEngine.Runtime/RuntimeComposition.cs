@@ -64,13 +64,30 @@ public static class RuntimeComposition
 {
     public static async Task<SharedComponents> BuildSharedAsync(string projectRoot)
     {
-        var stateDir = Path.Combine(projectRoot, "data");
+        projectRoot = Path.GetFullPath(projectRoot);
+
+        // The Windows launcher deliberately starts inside the data directory
+        // because that is where agents/, behavior_states.json and tool registries live.
+        // Also support launching from the repository root by resolving its data/ child.
+        if (!Directory.Exists(Path.Combine(projectRoot, "agents")) &&
+            Directory.Exists(Path.Combine(projectRoot, "data", "agents")))
+        {
+            projectRoot = Path.Combine(projectRoot, "data");
+        }
+
+        var stateDir = projectRoot;
         Directory.CreateDirectory(stateDir);
 
-        // Full 10-table sparkbyte_memory.db schema (Phase 3) — one connection,
-        // shared by every session's tool-usage/turn-snapshot writes.
-        var db = new SparkByteDatabase(Path.Combine(stateDir, "sparkbyte_memory.db"));
-        var telemetry = new Telemetry(projectRoot, db);
+        // Keep the database beside the agent cards and dynamic-tool registries.
+        // Migrate the prior accidental data/data location without deleting the original.
+        var databasePath = Path.Combine(stateDir, "sparkbyte_memory.db");
+        var legacyDatabasePath = Path.Combine(stateDir, "data", "sparkbyte_memory.db");
+        if (!File.Exists(databasePath) && File.Exists(legacyDatabasePath))
+        {
+            File.Copy(legacyDatabasePath, databasePath);
+        }
+        var db = new SparkByteDatabase(databasePath);
+        var telemetry = new Telemetry(stateDir, db);
         db.StartSession(telemetry.SessionId, Environment.OSVersion.ToString(), Environment.Version.ToString());
 
         return new SharedComponents(projectRoot, stateDir, telemetry, db, new HttpClient());
@@ -132,10 +149,42 @@ public static class RuntimeComposition
         }
 
         var agentRuntime = new AgentRuntime(engine, toolRegistry, telemetry, http, ToolSchemas.All(), db);
+
+        // Restore per-session operator/model/tool switches before the session is exposed.
+        var savedSettings = db.ReadSessionSettings(sessionId);
+        if (!string.IsNullOrWhiteSpace(savedSettings?.AgentName))
+            engine.SetAgent(savedSettings.AgentName);
+        if (!string.IsNullOrWhiteSpace(savedSettings?.ModelName))
+        {
+            agentRuntime.CurrentModel = savedSettings.ModelName;
+            engine.Backends.SetBackendModel("openrouter", savedSettings.ModelName);
+        }
+        if (!string.IsNullOrWhiteSpace(savedSettings?.DisabledToolsJson))
+        {
+            try
+            {
+                var disabled = JsonSerializer.Deserialize<string[]>(savedSettings.DisabledToolsJson) ?? [];
+                foreach (var name in disabled)
+                    if (toolRegistry.Contains(name)) toolRegistry.DisabledTools.Add(name);
+            }
+            catch (JsonException)
+            {
+                // Ignore malformed legacy settings and keep safe defaults.
+            }
+        }
+
         var chat = new ChatSession { Id = sessionId, Engine = engine, Tools = toolRegistry, Runtime = agentRuntime };
         chat.History.AddRange(db.ReadConversationHistory(sessionId));
+        PersistSessionSettings(chat, db);
         return chat;
     }
+
+    private static void PersistSessionSettings(ChatSession chat, SparkByteDatabase db) =>
+        db.WriteSessionSettings(
+            chat.Id,
+            chat.Engine.CurrentAgentName,
+            chat.Runtime.CurrentModel,
+            JsonSerializer.Serialize(chat.Tools.DisabledTools.OrderBy(name => name)));
 
     private static IResult ConfigureOpenRouterKey(SetApiKeyRequest req)
     {
@@ -169,6 +218,15 @@ public static class RuntimeComposition
 
         app.UseWebSockets();
         app.MapGet("/health", () => Results.Ok(new { status = "ok", sessions = sessions.ActiveIds.Count }));
+
+        app.MapGet("/api/persistence/status", () => Results.Ok(new
+        {
+            status = db.LastError is null ? "ok" : "degraded",
+            databasePath = db.DatabasePath,
+            databaseExists = File.Exists(db.DatabasePath),
+            databaseBytes = File.Exists(db.DatabasePath) ? new FileInfo(db.DatabasePath).Length : 0,
+            lastError = db.LastError,
+        }));
 
         app.MapGet("/api/setup/status", () =>
             Results.Ok(new { apiKeyConfigured = OpenRouterKeyStore.IsConfigured() }));
@@ -332,6 +390,7 @@ public static class RuntimeComposition
             // Keep this session's A2A/headless path (JLEngineCore.RunTurnAsync ->
             // GetBrainBackend) in sync too, so a model change applies uniformly.
             chat.Engine.Backends.SetBackendModel("openrouter", chat.Runtime.CurrentModel);
+            PersistSessionSettings(chat, db);
             telemetry.LogModelChange(previous, chat.Runtime.CurrentModel);
             return Results.Ok(new { model = chat.Runtime.CurrentModel });
         });
@@ -356,7 +415,11 @@ public static class RuntimeComposition
             // erroring — this endpoint relies on the GUI only ever sending names it
             // got from GET /api/agents, so that fallback path shouldn't trigger here.
             var ok = chat.Engine.SetAgent(req.Name);
-            if (ok) telemetry.LogAgentChange(previous, chat.Engine.CurrentAgentName);
+            if (ok)
+            {
+                PersistSessionSettings(chat, db);
+                telemetry.LogAgentChange(previous, chat.Engine.CurrentAgentName);
+            }
             return ok
                 ? Results.Ok(new { agent = chat.Engine.CurrentAgentName })
                 : Results.BadRequest(new { error = $"Unknown agent '{req.Name}'", agent = chat.Engine.CurrentAgentName });
@@ -374,6 +437,7 @@ public static class RuntimeComposition
             var chat = await sessions.GetOrCreateAsync(req.SessionId);
             if (req.Enabled) chat.Tools.DisabledTools.Remove(req.Name);
             else chat.Tools.DisabledTools.Add(req.Name);
+            PersistSessionSettings(chat, db);
             return Results.Ok(new { tools = chat.Tools.Catalog(ToolSchemas.All()) });
         });
 

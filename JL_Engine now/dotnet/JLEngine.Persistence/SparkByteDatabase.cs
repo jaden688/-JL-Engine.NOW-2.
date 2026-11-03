@@ -10,15 +10,21 @@ namespace JLEngine.Persistence;
 /// are side-channel persistence writes that must never break the caller's
 /// actual turn/tool-call.
 /// </summary>
+public sealed record PersistedSessionSettings(string? AgentName, string? ModelName, string DisabledToolsJson);
+
 public sealed class SparkByteDatabase : IDisposable
 {
     public SqliteConnection Connection { get; }
+    public string DatabasePath { get; }
+    public string? LastError => Volatile.Read(ref _lastError);
     private readonly object _sync = new();
+    private string? _lastError;
 
     public SparkByteDatabase(string dbPath)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(dbPath))!);
-        Connection = new SqliteConnection($"Data Source={dbPath}");
+        DatabasePath = Path.GetFullPath(dbPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        Connection = new SqliteConnection($"Data Source={DatabasePath}");
         Connection.Open();
         SparkByteSchema.EnsureCreated(Connection);
     }
@@ -73,12 +79,62 @@ public sealed class SparkByteDatabase : IDisposable
                     });
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Interlocked.Exchange(ref _lastError, $"ReadConversationHistory: {ex.GetType().Name}: {ex.Message}");
                 // A transcript read failure must not prevent the engine from starting.
             }
         }
         return history;
+    }
+
+    /// <summary>Persist per-chat settings that must survive an engine restart.</summary>
+    public void WriteSessionSettings(string sessionId, string? agentName, string? modelName, string disabledToolsJson)
+    {
+        Try(() =>
+        {
+            using var cmd = Connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO session_settings (session_id, agent_name, model_name, disabled_tools_json, updated_at)
+                VALUES ($sid, $agent, $model, $disabled, $updated)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    agent_name=excluded.agent_name,
+                    model_name=excluded.model_name,
+                    disabled_tools_json=excluded.disabled_tools_json,
+                    updated_at=excluded.updated_at
+                """;
+            cmd.Parameters.AddWithValue("$sid", sessionId);
+            cmd.Parameters.AddWithValue("$agent", (object?)agentName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$model", (object?)modelName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$disabled", disabledToolsJson);
+            cmd.Parameters.AddWithValue("$updated", DateTime.UtcNow.ToString("O"));
+            cmd.ExecuteNonQuery();
+        });
+    }
+
+    /// <summary>Load saved per-session settings. Null means this session has never been configured.</summary>
+    public PersistedSessionSettings? ReadSessionSettings(string sessionId)
+    {
+        lock (_sync)
+        {
+            try
+            {
+                using var cmd = Connection.CreateCommand();
+                cmd.CommandText = "SELECT agent_name, model_name, disabled_tools_json FROM session_settings WHERE session_id=$sid";
+                cmd.Parameters.AddWithValue("$sid", sessionId);
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read()) return null;
+                return new PersistedSessionSettings(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? "[]" : reader.GetString(2));
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _lastError, $"ReadSessionSettings: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
     }
 
     /// <summary>Persist a telemetry event using the same connection lock as every other database operation.</summary>
@@ -300,9 +356,11 @@ public sealed class SparkByteDatabase : IDisposable
             {
                 action();
             }
-            catch
+            catch (Exception ex)
             {
+                Interlocked.Exchange(ref _lastError, $"{ex.GetType().Name}: {ex.Message}");
                 // Persistence writes must never break the caller's actual turn/tool-call.
+                // The sticky LastError is exposed through /api/persistence/status.
             }
         }
     }

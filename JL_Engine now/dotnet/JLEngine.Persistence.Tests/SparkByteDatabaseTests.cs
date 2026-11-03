@@ -28,7 +28,7 @@ public class SparkByteDatabaseTests
         [
             "memory", "tools", "thoughts", "knowledge", "agents",
             "behavior_states", "sessions", "web_cache", "tool_usage_log",
-            "telemetry", "turn_snapshots", "conversation_messages",
+            "telemetry", "turn_snapshots", "conversation_messages", "session_settings",
         ];
 
         foreach (var table in expectedTables)
@@ -64,6 +64,37 @@ public class SparkByteDatabaseTests
         Assert.Equal(2, restored.Count);
         Assert.Equal("hi there", restored[1]["content"]);
         Assert.Empty(reopened.ReadConversationHistory("unknown-session"));
+    }
+
+    [Fact]
+    public void SessionSettings_RoundTripAcrossDatabaseReopen()
+    {
+        var path = NewDbPath();
+        using (var db = new SparkByteDatabase(path))
+        {
+            db.WriteSessionSettings(
+                "session-persist",
+                "Slappy",
+                "deepseek/deepseek-v4-flash",
+                "[\"read_file\",\"run_command\"]");
+
+            var settings = db.ReadSessionSettings("session-persist");
+            Assert.NotNull(settings);
+            Assert.Equal("Slappy", settings.AgentName);
+            Assert.Equal("deepseek/deepseek-v4-flash", settings.ModelName);
+            Assert.Equal("[\"read_file\",\"run_command\"]", settings.DisabledToolsJson);
+
+            // Upsert replaces the previous settings rather than creating duplicates.
+            db.WriteSessionSettings("session-persist", "Balthazar", "openai/gpt-5", "[\"write_file\"]");
+            Assert.Equal(1, CountRows(db.Connection, "session_settings"));
+        }
+
+        using var reopened = new SparkByteDatabase(path);
+        var restored = reopened.ReadSessionSettings("session-persist");
+        Assert.NotNull(restored);
+        Assert.Equal("Balthazar", restored.AgentName);
+        Assert.Equal("openai/gpt-5", restored.ModelName);
+        Assert.Equal("[\"write_file\"]", restored.DisabledToolsJson);
     }
 
     [Fact]
@@ -198,5 +229,6 @@ public class SparkByteDatabaseTests
         // matching Julia's `catch e; @warn ...; end` pattern.
         var exception = Record.Exception(() => db.WriteThought("ctx", "thought", "mood", "gait"));
         Assert.Null(exception);
+        Assert.Contains("InvalidOperationException", db.LastError ?? "", StringComparison.Ordinal);
     }
 }

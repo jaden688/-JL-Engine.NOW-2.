@@ -6,9 +6,10 @@ namespace JLEngine.Persistence;
 /// Port of `_open_memory_db`'s CREATE TABLE statements (src/App.jl:60-116)
 /// and the index list (src/App.jl:291-304). Exact column-for-column match
 /// with the live sparkbyte_memory.db schema confirmed via direct sqlite3
-/// inspection. Covers the core tables, including durable chat transcripts; the 4 A2A-specific tables
-/// (a2a_tasks, a2a_push_notification_configs, a2a_accounts, a2a_usage_ledger)
-/// are deferred to Phase 4 along with the A2A server itself.
+/// inspection. Covers the core tables, including durable chat transcripts and per-session
+/// UI settings. A2A-specific tables (a2a_tasks, a2a_accounts, a2a_usage_ledger)
+/// are created by the Bridges layer when the A2A host starts. Push-notification
+/// config storage remains out of scope.
 ///
 /// No EF Core migrations — idempotent CREATE TABLE/INDEX IF NOT EXISTS only,
 /// matching Julia's own lack of a formal migration system.
@@ -80,6 +81,15 @@ public static class SparkByteSchema
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at TEXT NOT NULL)
+        """,
+
+        """
+        CREATE TABLE IF NOT EXISTS session_settings (
+            session_id TEXT PRIMARY KEY,
+            agent_name TEXT,
+            model_name TEXT,
+            disabled_tools_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL)
         """,
 
         """
