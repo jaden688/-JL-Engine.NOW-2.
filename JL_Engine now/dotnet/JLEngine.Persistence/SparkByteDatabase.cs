@@ -292,7 +292,7 @@ public sealed class SparkByteDatabase : IDisposable
         });
     }
 
-    private static void Try(Action action)
+    private void Try(Action action)
     {
         lock (_sync)
         {
