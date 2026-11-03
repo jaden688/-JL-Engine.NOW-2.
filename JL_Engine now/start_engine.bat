@@ -3,7 +3,7 @@ setlocal
 
 set "ROOT=%~dp0"
 set "PUBLISHED_EXE=%ROOT%JLEngine.Host.exe"
-set "BUILD_EXE=%ROOT%dotnet\JLEngine.Host\bin\Release\net10.0\JLEngine.Host.exe"
+set "BUILD_EXE=%ROOT%dotnet\JLEngine.Host\bin\Release\net11.0\JLEngine.Host.exe"
 set "PROJECT=%ROOT%dotnet\JLEngine.Host\JLEngine.Host.csproj"
 
 if exist "%PUBLISHED_EXE%" (
@@ -14,14 +14,14 @@ if exist "%PUBLISHED_EXE%" (
 
 where dotnet >nul 2>nul
 if errorlevel 1 if not exist "%PUBLISHED_EXE%" (
-    echo .NET 10 SDK is required to build from source.
+    echo .NET 11 SDK is required to build from source.
     echo Install it from https://dot.net/download
     pause
     exit /b 1
 )
 
 if not exist "%EXE%" (
-    echo Build not found. Building JL Engine for .NET 10...
+    echo Build not found. Building JL Engine for .NET 11...
     dotnet build "%PROJECT%" -c Release
     if errorlevel 1 (
         echo Build failed. See errors above.

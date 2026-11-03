@@ -11,7 +11,8 @@ using Microsoft.Extensions.FileProviders;
 var builder = WebApplication.CreateBuilder(args);
 // Default bind; an explicit --urls arg or ASPNETCORE_URLS env var overrides
 // this (those configuration sources are layered on top of UseUrls).
-builder.WebHost.UseUrls("http://127.0.0.1:8081");
+var configuredUrls = builder.Configuration["urls"];
+builder.WebHost.UseUrls(string.IsNullOrWhiteSpace(configuredUrls) ? "http://127.0.0.1:8081" : configuredUrls);
 var app = builder.Build();
 // Serve the chat GUI from the exe's own folder rather than the process's
 // working directory — the engine is launched with cwd = the data/ folder

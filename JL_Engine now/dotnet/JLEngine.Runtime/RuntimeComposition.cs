@@ -159,7 +159,7 @@ public static class RuntimeComposition
 
     /// <summary>Wires every HTTP/WS endpoint the GUI (and A2A/Autopilot,
     /// via their own fixed session) needs onto a WebApplication — shared
-    /// between Runtime's standalone Program.cs and JLEngine.Host.</summary>
+    /// for the composed JLEngine.Host process.</summary>
     public static void MapChatEndpoints(this WebApplication app, SharedComponents shared, SessionRegistry sessions)
     {
         var telemetry = shared.Telemetry;
@@ -247,6 +247,9 @@ public static class RuntimeComposition
                 telemetry.LogWsOut("reply");
                 await ws.SendAsync(Encoding.UTF8.GetBytes(replyJson), WebSocketMessageType.Text, true, context.RequestAborted);
             }
+
+            if (ws.State == WebSocketState.CloseReceived)
+                await ws.CloseAsync(ws.CloseStatus ?? WebSocketCloseStatus.NormalClosure, ws.CloseStatusDescription, CancellationToken.None);
         });
 
         // --- Live-terminal feed: every telemetry event, pushed as it happens ---
@@ -297,6 +300,8 @@ public static class RuntimeComposition
             {
                 telemetry.OnEvent -= Handler;
                 await receiveDrain;
+                if (ws.State == WebSocketState.CloseReceived)
+                    await ws.CloseAsync(ws.CloseStatus ?? WebSocketCloseStatus.NormalClosure, ws.CloseStatusDescription, CancellationToken.None);
             }
         });
 
